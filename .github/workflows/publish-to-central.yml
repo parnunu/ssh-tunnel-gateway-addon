@@ -1,0 +1,63 @@
+name: Publish to Central Add-on Repo
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-to-central.yml"
+      - "CHANGELOG.md"
+      - "config.yaml"
+      - "DOCS.md"
+      - "Dockerfile"
+      - "LICENSE"
+      - "README.md"
+      - "icon.png"
+      - "logo.png"
+      - "run.sh"
+      - "translations/**"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v5
+
+      - name: Checkout central repo
+        uses: actions/checkout@v5
+        with:
+          repository: parnunu/home-assistant-addons
+          token: ${{ secrets.CENTRAL_REPO_PAT }}
+          path: central
+
+      - name: Sync published folder
+        run: |
+          set -euo pipefail
+
+          target="central/ssh_tunnel_gateway"
+          rm -rf "${target}"
+          mkdir -p "${target}/translations"
+
+          cp CHANGELOG.md config.yaml DOCS.md Dockerfile LICENSE README.md icon.png logo.png run.sh "${target}/"
+          cp -R translations/. "${target}/translations/"
+
+      - name: Commit and push changes
+        run: |
+          set -euo pipefail
+
+          cd central
+          if git diff --quiet -- ssh_tunnel_gateway; then
+            echo "No central repo changes to publish."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ssh_tunnel_gateway
+          git commit -m "chore(publish): sync ssh_tunnel_gateway from parnunu/ssh-tunnel-gateway-addon@${GITHUB_SHA}"
+          git push origin main
