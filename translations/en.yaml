@@ -15,6 +15,9 @@ configuration:
       ssh_user:
         name: SSH User
         description: SSH username used for the tunnel connection.
+      ssh_private_key:
+        name: SSH Private Key
+        description: File name stored under the add-on ssh/keys folder. Default is id_ed25519.
       local_port:
         name: Local Port
         description: Port exposed on the Home Assistant host IP.
@@ -32,4 +35,4 @@ configuration:
         description: Failed keepalives before reconnect. Default is 3.
       strict_host_key_checking:
         name: Strict Host Key Checking
-        description: Require the remote host key to exist in known_hosts.
+        description: Fetch host keys before connect and reject unexpected changes. When disabled, the SSH client learns new keys automatically.

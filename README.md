@@ -20,7 +20,8 @@ The add-on:
 
 - supports multiple tunnel definitions
 - expects key-based SSH authentication
-- keeps SSH private key and `known_hosts` in persistent add-on storage
+- lets each tunnel choose a private key file by name
+- keeps SSH private keys and managed host keys in persistent add-on storage
 - validates configuration before starting
 - reconnects tunnels automatically if they drop
 - logs starts, failures, and reconnect attempts clearly
@@ -30,7 +31,7 @@ The add-on:
 1. In Home Assistant, add `https://github.com/parnunu/home-assistant-addons` as a custom add-on repository.
 2. Install `SSH Tunnel Gateway`.
 3. Generate or choose an SSH private key for the add-on.
-4. Put `id_ed25519` and `known_hosts` into the add-on's public config folder under `ssh/`.
+4. Put the private key file into the add-on's public config folder under `ssh/keys/`.
 5. Configure one or more tunnels.
 6. Start the add-on and verify the logs.
 
@@ -47,14 +48,8 @@ Detailed usage, configuration, security notes, and troubleshooting are in [DOCS.
    ```
 
 4. Add the public key to the remote server's `authorized_keys`.
-5. Create `known_hosts`, for example:
-
-   ```bash
-   ssh-keyscan -p 22 bastion.example.com > known_hosts
-   ```
-
-6. Copy `id_ed25519` and `known_hosts` into the add-on config folder under `ssh/`.
-7. Save an add-on config such as:
+5. Copy the private key into the add-on config folder under `ssh/keys/`. You can keep the filename `id_ed25519` or use your own file name.
+6. Save an add-on config such as:
 
    ```yaml
    tunnels:
@@ -62,6 +57,7 @@ Detailed usage, configuration, security notes, and troubleshooting are in [DOCS.
        ssh_host: bastion.example.com
        ssh_port: 22
        ssh_user: ha_tunnel
+       ssh_private_key: id_ed25519
        local_port: 3000
        remote_host: 127.0.0.1
        remote_port: 3000
@@ -70,8 +66,8 @@ Detailed usage, configuration, security notes, and troubleshooting are in [DOCS.
        strict_host_key_checking: true
    ```
 
-8. Start the add-on.
-9. Open `http://<HA-IP>:3000` from another LAN device to test the tunnel.
+7. Start the add-on. It will learn the SSH host key automatically and store it in persistent add-on data.
+8. Open `http://<HA-IP>:3000` from another LAN device to test the tunnel.
 
 ## Publishing to the central repo
 

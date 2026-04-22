@@ -41,29 +41,18 @@ ssh-keygen -t ed25519 -f id_ed25519 -C "ha-ssh-tunnel-gateway"
 
 This gives you:
 
-- `id_ed25519` -> private key used by the add-on
+- `id_ed25519` -> private key you can copy into the add-on key folder
 - `id_ed25519.pub` -> public key to install on the remote SSH server
 
 Copy the public key to the remote server's `~/.ssh/authorized_keys` for the SSH user you plan to use.
 
 Use a dedicated key without an interactive passphrase. The add-on cannot answer a password or passphrase prompt.
 
-### 3. Create known_hosts
-
-If you want the default secure mode, build a `known_hosts` file before starting the add-on:
-
-```bash
-ssh-keyscan -p 22 bastion.example.com > known_hosts
-```
-
-If your SSH server uses a non-default port, change `22` to that port.
-
-### 4. Find the add-on config folder
+### 3. Find the add-on config folder
 
 The add-on reads:
 
-- `/config/ssh/id_ed25519`
-- `/config/ssh/known_hosts`
+- `/config/ssh/keys/<your file name>`
 
 In Home Assistant terms, this is the add-on's public config folder. On disk it is the folder under `addon_configs` whose name ends with `_ssh_tunnel_gateway`.
 
@@ -80,20 +69,19 @@ Expected final layout:
 ```text
 .../_ssh_tunnel_gateway/
   ssh/
-    id_ed25519
-    known_hosts
+    keys/
+      id_ed25519
 ```
 
-### 5. Copy the key files
+### 4. Copy the private key file
 
-Copy these files into the add-on config folder:
+Copy your private key into the add-on config folder:
 
-- `id_ed25519` -> save as `ssh/id_ed25519`
-- `known_hosts` -> save as `ssh/known_hosts`
+- `id_ed25519` -> save as `ssh/keys/id_ed25519`
 
-Do not rename the private key file. The add-on looks specifically for `id_ed25519`.
+You can rename the key file if you want. The add-on uses the `ssh_private_key` field in the tunnel configuration to decide which file to load.
 
-### 6. Configure one tunnel first
+### 5. Configure one tunnel first
 
 Start with one simple tunnel before adding more.
 
@@ -105,6 +93,7 @@ tunnels:
     ssh_host: bastion.example.com
     ssh_port: 22
     ssh_user: ha_tunnel
+    ssh_private_key: id_ed25519
     local_port: 3000
     remote_host: 127.0.0.1
     remote_port: 3000
@@ -118,8 +107,9 @@ Meaning:
 - Home Assistant listens on `0.0.0.0:3000`
 - traffic is forwarded over SSH to `bastion.example.com`
 - the remote SSH server then connects to `127.0.0.1:3000` on its own side
+- the add-on loads the private key file `ssh/keys/id_ed25519`
 
-### 7. Start the add-on
+### 6. Start the add-on
 
 Start the add-on and open the log.
 
@@ -127,10 +117,11 @@ Healthy startup looks like this in plain terms:
 
 - config validated
 - key files found
+- host key learned or reused from persistent storage
 - tunnel count reported
 - one "Starting tunnel" line per configured tunnel
 
-### 8. Test from another LAN device
+### 7. Test from another LAN device
 
 Use the Home Assistant host IP and the configured `local_port`.
 
@@ -141,7 +132,7 @@ Examples:
 
 Do not test with `localhost` from your laptop or phone. Use the actual Home Assistant IP on your LAN.
 
-### 9. Add more tunnels
+### 8. Add more tunnels
 
 Once the first tunnel works, add more entries under `tunnels:`.
 
@@ -152,34 +143,34 @@ Each tunnel must have:
 
 ## Key material
 
-The add-on expects these files:
+The add-on expects private keys in:
 
-- `/config/ssh/id_ed25519`
-- `/config/ssh/known_hosts`
+- `/config/ssh/keys/`
 
 Inside the container, `/config` is the add-on's public config folder created by Home Assistant. On the host this lives under the add-on's `addon_configs` directory, in the folder ending with `_ssh_tunnel_gateway`.
 
-The add-on copies those files into `/data/ssh/` on startup so they stay in persistent add-on storage.
+The add-on copies selected private keys into `/data/ssh/keys/` on startup and manages `known_hosts` automatically in `/data/ssh/known_hosts`.
 
 ### Private key
 
 Use an SSH private key that is allowed to connect to the remote SSH server and create local forwards. Recommended permissions:
 
 - key type: `ed25519`
-- file name: `id_ed25519`
+- store the file under `ssh/keys/`
 - no password prompt at runtime
 
 If your key is passphrase-protected, the add-on cannot answer the prompt, so use a dedicated deployment key without an interactive passphrase.
 
-### known_hosts
+### Managed host keys
 
-If `strict_host_key_checking` is `true`, `known_hosts` must contain the remote SSH host key. Example:
+You do not need to create `known_hosts` manually.
 
-```bash
-ssh-keyscan -p 22 bastion.example.com >> known_hosts
-```
+The add-on manages host keys automatically in persistent add-on data:
 
-If `strict_host_key_checking` is `false`, the add-on allows the connection without requiring a populated `known_hosts` file, but that is less secure.
+- when `strict_host_key_checking: true`, the add-on tries to fetch the host key before the tunnel starts and refuses unexpected changes later
+- when `strict_host_key_checking: false`, the SSH client uses `accept-new`, so new host keys are learned automatically during connect and unexpected changes are still rejected
+
+This is trust-on-first-use behavior. The first time a host key is learned, the add-on trusts the key it sees and stores it for future runs.
 
 ## Configuration reference
 
@@ -191,6 +182,7 @@ Each tunnel supports:
 - `ssh_host`: Hostname or IP address of the SSH server.
 - `ssh_port`: SSH server port. Default: `22`.
 - `ssh_user`: SSH username.
+- `ssh_private_key`: Private key file name stored under `/config/ssh/keys/`. Default: `id_ed25519`.
 - `local_port`: Port to listen on from the Home Assistant host network.
 - `remote_host`: Host to reach from the remote SSH server. Default: `127.0.0.1`.
 - `remote_port`: Port to reach from the remote SSH server.
@@ -206,6 +198,7 @@ tunnels:
     ssh_host: bastion.example.com
     ssh_port: 22
     ssh_user: ha_tunnel
+    ssh_private_key: proxmox.key
     local_port: 8006
     remote_host: 127.0.0.1
     remote_port: 8006
@@ -217,6 +210,7 @@ tunnels:
     ssh_host: bastion.example.com
     ssh_port: 22
     ssh_user: ha_tunnel
+    ssh_private_key: id_ed25519
     local_port: 3000
     remote_host: 127.0.0.1
     remote_port: 3000
@@ -228,6 +222,7 @@ tunnels:
     ssh_host: homebridge-gateway.example.net
     ssh_port: 2222
     ssh_user: bridge
+    ssh_private_key: bridge.key
     local_port: 8581
     remote_host: 127.0.0.1
     remote_port: 8581
@@ -248,6 +243,7 @@ tunnels:
     ssh_host: bastion.example.com
     ssh_port: 22
     ssh_user: ha_tunnel
+    ssh_private_key: proxmox.key
     local_port: 8006
     remote_host: 127.0.0.1
     remote_port: 8006
@@ -274,6 +270,7 @@ tunnels:
     ssh_host: bastion.example.com
     ssh_port: 22
     ssh_user: ha_tunnel
+    ssh_private_key: nas.key
     local_port: 5001
     remote_host: 192.168.50.20
     remote_port: 5001
@@ -288,16 +285,17 @@ On startup the add-on:
 
 1. validates the add-on configuration
 2. validates the SSH key files
-3. copies key material into persistent `/data/ssh`
-4. starts one SSH process per tunnel
-5. keeps each tunnel in a reconnect loop
+3. copies selected private keys into persistent `/data/ssh/keys`
+4. learns or reuses SSH host keys in persistent `/data/ssh/known_hosts`
+5. starts one SSH process per tunnel
+6. keeps each tunnel in a reconnect loop
 
 Each tunnel uses `ExitOnForwardFailure=yes`, so bind failures and forwarding setup failures are logged immediately.
 
 ## Security notes
 
 - `host_network: true` is required so the forwarded ports bind on the Home Assistant host IP and are reachable from the LAN.
-- Prefer `strict_host_key_checking: true` with a populated `known_hosts` file.
+- Prefer `strict_host_key_checking: true` for stricter startup validation.
 - Use a dedicated SSH user with the minimum server-side permissions needed.
 - Prefer a dedicated deployment key rather than reusing a personal key.
 - Every `local_port` you expose becomes reachable on your LAN, so only publish services you actually want available there.
@@ -309,8 +307,8 @@ Each tunnel uses `ExitOnForwardFailure=yes`, so bind failures and forwarding set
 Common causes:
 
 - no tunnels configured
-- missing `/config/ssh/id_ed25519`
-- `strict_host_key_checking: true` with an empty or missing `known_hosts`
+- missing private key file under `/config/ssh/keys/`
+- `ssh_private_key` points to a file name that does not exist in `/config/ssh/keys/`
 - duplicate `local_port` values
 - invalid port values outside `1-65535`
 - the SSH key is passphrase-protected
@@ -336,8 +334,8 @@ Check:
 
 ### Remote host key changed
 
-Update `/config/ssh/known_hosts` with the new host key and restart the add-on.
+Clear the add-on's managed host key entry from `/data/ssh/known_hosts` and restart the add-on so it can learn the new key.
 
 ### First run created the folder and then failed
 
-That is normal if the add-on was started before `ssh/id_ed25519` existed. Copy the key files into the created folder and start it again.
+That is normal if the add-on was started before the configured key file existed under `ssh/keys/`. Copy the private key into the created folder and start it again.

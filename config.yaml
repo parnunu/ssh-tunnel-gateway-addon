@@ -24,6 +24,7 @@ schema:
       ssh_host: str
       ssh_port: port?
       ssh_user: str
+      ssh_private_key: str?
       local_port: port
       remote_host: str?
       remote_port: port

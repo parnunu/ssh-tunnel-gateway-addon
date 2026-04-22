@@ -6,12 +6,13 @@ source /usr/lib/bashio/bashio.sh
 readonly OPTIONS_FILE="/data/options.json"
 readonly PUBLIC_CONFIG_DIR="/config"
 readonly PUBLIC_SSH_DIR="${PUBLIC_CONFIG_DIR}/ssh"
+readonly PUBLIC_KEYS_DIR="${PUBLIC_SSH_DIR}/keys"
 readonly RUNTIME_SSH_DIR="/data/ssh"
-readonly PRIVATE_KEY_SOURCE="${PUBLIC_SSH_DIR}/id_ed25519"
-readonly KNOWN_HOSTS_SOURCE="${PUBLIC_SSH_DIR}/known_hosts"
-readonly PRIVATE_KEY_TARGET="${RUNTIME_SSH_DIR}/id_ed25519"
+readonly RUNTIME_KEYS_DIR="${RUNTIME_SSH_DIR}/keys"
+readonly LEGACY_PRIVATE_KEY_SOURCE="${PUBLIC_SSH_DIR}/id_ed25519"
 readonly KNOWN_HOSTS_TARGET="${RUNTIME_SSH_DIR}/known_hosts"
 readonly RECONNECT_DELAY_SECONDS=5
+readonly DEFAULT_PRIVATE_KEY_FILENAME="id_ed25519"
 
 fail() {
     bashio::log.error "$1"
@@ -36,6 +37,7 @@ normalize_tunnels() {
               ssh_host: (.ssh_host // "" | tostring),
               ssh_port: (.ssh_port // 22),
               ssh_user: (.ssh_user // "" | tostring),
+              ssh_private_key: (.ssh_private_key // "'"${DEFAULT_PRIVATE_KEY_FILENAME}"'" | tostring),
               local_port: (.local_port // 0),
               remote_host: (.remote_host // "127.0.0.1" | tostring),
               remote_port: (.remote_port // 0),
@@ -63,27 +65,112 @@ validate_positive_integer() {
     (( value >= 1 )) || fail "${label} must be at least 1."
 }
 
-prepare_ssh_material() {
-    mkdir -p "${PUBLIC_SSH_DIR}" "${RUNTIME_SSH_DIR}"
+validate_key_name() {
+    local label=${1}
+    local value=${2}
 
-    if [[ ! -s "${PRIVATE_KEY_SOURCE}" ]]; then
-        fail "Missing SSH private key at ${PRIVATE_KEY_SOURCE}. Put your key in the add-on config folder and restart."
+    [[ -n "${value}" ]] || fail "${label} must not be empty."
+    [[ "${value}" =~ ^[A-Za-z0-9._-]+$ ]] || fail "${label} must be a file name stored under ${PUBLIC_KEYS_DIR}."
+}
+
+resolve_key_source_path() {
+    local key_name=${1}
+    local candidate="${PUBLIC_KEYS_DIR}/${key_name}"
+
+    validate_key_name "ssh_private_key" "${key_name}"
+
+    if [[ -s "${candidate}" ]]; then
+        printf '%s\n' "${candidate}"
+        return 0
     fi
 
-    install -m 600 "${PRIVATE_KEY_SOURCE}" "${PRIVATE_KEY_TARGET}"
+    if [[ "${key_name}" == "${DEFAULT_PRIVATE_KEY_FILENAME}" ]] && [[ -s "${LEGACY_PRIVATE_KEY_SOURCE}" ]]; then
+        printf '%s\n' "${LEGACY_PRIVATE_KEY_SOURCE}"
+        return 0
+    fi
 
-    if [[ -f "${KNOWN_HOSTS_SOURCE}" ]]; then
-        install -m 600 "${KNOWN_HOSTS_SOURCE}" "${KNOWN_HOSTS_TARGET}"
+    fail "Missing SSH private key file '${key_name}'. Put it in ${PUBLIC_KEYS_DIR}/ and restart."
+}
+
+known_host_lookup() {
+    local ssh_host=${1}
+    local ssh_port=${2}
+
+    if [[ "${ssh_port}" == "22" ]]; then
+        printf '%s\n' "${ssh_host}"
     else
-        : > "${KNOWN_HOSTS_TARGET}"
-        chmod 600 "${KNOWN_HOSTS_TARGET}"
-        bashio::log.warning "No known_hosts file found at ${KNOWN_HOSTS_SOURCE}. Tunnels with strict host key checking enabled will fail validation."
+        printf '[%s]:%s\n' "${ssh_host}" "${ssh_port}"
     fi
+}
+
+ensure_known_host_entry() {
+    local ssh_host=${1}
+    local ssh_port=${2}
+    local required=${3}
+    local lookup
+    local scan_output
+
+    lookup=$(known_host_lookup "${ssh_host}" "${ssh_port}")
+
+    if ssh-keygen -F "${lookup}" -f "${KNOWN_HOSTS_TARGET}" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    bashio::log.info "Learning SSH host key for ${lookup}."
+
+    scan_output=$(ssh-keyscan -T 10 -p "${ssh_port}" "${ssh_host}" 2>/dev/null || true)
+
+    if [[ -z "${scan_output}" ]]; then
+        if [[ "${required}" == "true" ]]; then
+            fail "Unable to fetch SSH host key for ${lookup}. Confirm the SSH server is reachable."
+        fi
+
+        bashio::log.warning "Unable to prefetch SSH host key for ${lookup}. The SSH client will try to learn it during connect."
+        return 0
+    fi
+
+    printf '%s\n' "${scan_output}" >> "${KNOWN_HOSTS_TARGET}"
+    chmod 600 "${KNOWN_HOSTS_TARGET}"
+}
+
+prepare_ssh_material() {
+    local tunnels_json=${1}
+    declare -A prepared_keys=()
+
+    mkdir -p "${PUBLIC_SSH_DIR}" "${PUBLIC_KEYS_DIR}" "${RUNTIME_SSH_DIR}" "${RUNTIME_KEYS_DIR}"
+    touch "${KNOWN_HOSTS_TARGET}"
+    chmod 600 "${KNOWN_HOSTS_TARGET}"
+
+    while IFS= read -r tunnel; do
+        local ssh_host
+        local ssh_port
+        local ssh_private_key
+        local strict_host_key_checking
+        local source_key_path
+        local runtime_key_path
+
+        ssh_host=$(json_value '.ssh_host' "${tunnel}")
+        ssh_port=$(json_value '.ssh_port' "${tunnel}")
+        ssh_private_key=$(json_value '.ssh_private_key' "${tunnel}")
+        strict_host_key_checking=$(json_value '.strict_host_key_checking' "${tunnel}")
+
+        if [[ -z "${prepared_keys[${ssh_private_key}]:-}" ]]; then
+            source_key_path=$(resolve_key_source_path "${ssh_private_key}")
+            runtime_key_path="${RUNTIME_KEYS_DIR}/${ssh_private_key}"
+            install -m 600 "${source_key_path}" "${runtime_key_path}"
+            prepared_keys["${ssh_private_key}"]=1
+        fi
+
+        if [[ "${strict_host_key_checking}" == "true" ]]; then
+            ensure_known_host_entry "${ssh_host}" "${ssh_port}" "true"
+        else
+            ensure_known_host_entry "${ssh_host}" "${ssh_port}" "false"
+        fi
+    done < <(jq -c '.[]' <<<"${tunnels_json}")
 }
 
 validate_tunnels() {
     local tunnels_json=${1}
-    local strict_host_key_count=0
     local count
     declare -A seen_names=()
     declare -A seen_local_ports=()
@@ -97,28 +184,29 @@ validate_tunnels() {
         local ssh_host
         local ssh_port
         local ssh_user
+        local ssh_private_key
         local local_port
         local remote_host
         local remote_port
         local server_alive_interval
         local server_alive_count_max
-        local strict_host_key_checking
 
         name=$(json_value '.name' "${tunnel}")
         ssh_host=$(json_value '.ssh_host' "${tunnel}")
         ssh_port=$(json_value '.ssh_port' "${tunnel}")
         ssh_user=$(json_value '.ssh_user' "${tunnel}")
+        ssh_private_key=$(json_value '.ssh_private_key' "${tunnel}")
         local_port=$(json_value '.local_port' "${tunnel}")
         remote_host=$(json_value '.remote_host' "${tunnel}")
         remote_port=$(json_value '.remote_port' "${tunnel}")
         server_alive_interval=$(json_value '.server_alive_interval' "${tunnel}")
         server_alive_count_max=$(json_value '.server_alive_count_max' "${tunnel}")
-        strict_host_key_checking=$(json_value '.strict_host_key_checking' "${tunnel}")
 
         [[ -n "${name}" ]] || fail "Tunnel #$((index + 1)) is missing name."
         [[ -n "${ssh_host}" ]] || fail "Tunnel '${name}' is missing ssh_host."
         [[ -n "${ssh_user}" ]] || fail "Tunnel '${name}' is missing ssh_user."
         [[ -n "${remote_host}" ]] || fail "Tunnel '${name}' is missing remote_host."
+        validate_key_name "Tunnel '${name}' ssh_private_key" "${ssh_private_key}"
 
         validate_port "Tunnel '${name}' ssh_port" "${ssh_port}"
         validate_port "Tunnel '${name}' local_port" "${local_port}"
@@ -136,16 +224,8 @@ validate_tunnels() {
         fi
         seen_local_ports["${local_port}"]=1
 
-        if [[ "${strict_host_key_checking}" == "true" ]]; then
-            strict_host_key_count=$((strict_host_key_count + 1))
-        fi
-
         index=$((index + 1))
     done < <(jq -c '.[]' <<<"${tunnels_json}")
-
-    if (( strict_host_key_count > 0 )) && [[ ! -s "${KNOWN_HOSTS_TARGET}" ]]; then
-        fail "strict_host_key_checking=true requires a non-empty known_hosts file at ${KNOWN_HOSTS_SOURCE}."
-    fi
 }
 
 start_tunnel_manager() {
@@ -154,6 +234,7 @@ start_tunnel_manager() {
     local ssh_host
     local ssh_port
     local ssh_user
+    local ssh_private_key
     local local_port
     local remote_host
     local remote_port
@@ -162,11 +243,14 @@ start_tunnel_manager() {
     local strict_host_key_checking
     local destination
     local bind_target
+    local private_key_target
+    local strict_host_key_mode
 
     name=$(json_value '.name' "${tunnel}")
     ssh_host=$(json_value '.ssh_host' "${tunnel}")
     ssh_port=$(json_value '.ssh_port' "${tunnel}")
     ssh_user=$(json_value '.ssh_user' "${tunnel}")
+    ssh_private_key=$(json_value '.ssh_private_key' "${tunnel}")
     local_port=$(json_value '.local_port' "${tunnel}")
     remote_host=$(json_value '.remote_host' "${tunnel}")
     remote_port=$(json_value '.remote_port' "${tunnel}")
@@ -176,6 +260,13 @@ start_tunnel_manager() {
 
     destination="${ssh_user}@${ssh_host}"
     bind_target="0.0.0.0:${local_port}:${remote_host}:${remote_port}"
+    private_key_target="${RUNTIME_KEYS_DIR}/${ssh_private_key}"
+
+    if [[ "${strict_host_key_checking}" == "true" ]]; then
+        strict_host_key_mode="yes"
+    else
+        strict_host_key_mode="accept-new"
+    fi
 
     trap 'exit 0' TERM INT
 
@@ -185,7 +276,7 @@ start_tunnel_manager() {
             -T
             -g
             -p "${ssh_port}"
-            -i "${PRIVATE_KEY_TARGET}"
+            -i "${private_key_target}"
             -L "${bind_target}"
             -o BatchMode=yes
             -o ConnectTimeout=10
@@ -195,21 +286,11 @@ start_tunnel_manager() {
             -o ServerAliveInterval="${server_alive_interval}"
             -o ServerAliveCountMax="${server_alive_count_max}"
             -o TCPKeepAlive=yes
+            -o StrictHostKeyChecking="${strict_host_key_mode}"
+            -o UserKnownHostsFile="${KNOWN_HOSTS_TARGET}"
         )
 
-        if [[ "${strict_host_key_checking}" == "true" ]]; then
-            ssh_args+=(
-                -o StrictHostKeyChecking=yes
-                -o UserKnownHostsFile="${KNOWN_HOSTS_TARGET}"
-            )
-        else
-            ssh_args+=(
-                -o StrictHostKeyChecking=no
-                -o UserKnownHostsFile=/dev/null
-            )
-        fi
-
-        bashio::log.info "[${name}] Starting tunnel on ${local_port} -> ${remote_host}:${remote_port} via ${destination}:${ssh_port}"
+        bashio::log.info "[${name}] Starting tunnel on ${local_port} -> ${remote_host}:${remote_port} via ${destination}:${ssh_port} using key ${ssh_private_key}"
 
         if ssh "${ssh_args[@]}" "${destination}"; then
             bashio::log.warning "[${name}] SSH exited cleanly. Reconnecting in ${RECONNECT_DELAY_SECONDS}s."
@@ -242,14 +323,15 @@ main() {
 
     [[ -f "${OPTIONS_FILE}" ]] || fail "Missing add-on options file: ${OPTIONS_FILE}."
 
-    prepare_ssh_material
     tunnels_json=$(normalize_tunnels)
     validate_tunnels "${tunnels_json}"
+    prepare_ssh_material "${tunnels_json}"
 
     tunnel_count=$(jq 'length' <<<"${tunnels_json}")
 
     bashio::log.info "SSH Tunnel Gateway validated ${tunnel_count} tunnel(s)."
-    bashio::log.info "Place key material in ${PUBLIC_SSH_DIR}/id_ed25519 and ${PUBLIC_SSH_DIR}/known_hosts."
+    bashio::log.info "Place SSH private keys in ${PUBLIC_KEYS_DIR}/ and refer to the file name with ssh_private_key."
+    bashio::log.info "SSH host keys are managed automatically in ${KNOWN_HOSTS_TARGET}."
 
     trap shutdown TERM INT
 
