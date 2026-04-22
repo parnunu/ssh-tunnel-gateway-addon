@@ -1,5 +1,5 @@
 name: SSH Tunnel Gateway
-version: "1.0.0"
+version: "1.0.1"
 slug: ssh_tunnel_gateway
 description: >-
   Expose remote services to your LAN through persistent SSH local port forwards.
