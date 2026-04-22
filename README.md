@@ -29,11 +29,49 @@ The add-on:
 
 1. In Home Assistant, add `https://github.com/parnunu/home-assistant-addons` as a custom add-on repository.
 2. Install `SSH Tunnel Gateway`.
-3. Put `id_ed25519` and `known_hosts` into the add-on's public config folder under `ssh/`.
-4. Configure one or more tunnels.
-5. Start the add-on.
+3. Generate or choose an SSH private key for the add-on.
+4. Put `id_ed25519` and `known_hosts` into the add-on's public config folder under `ssh/`.
+5. Configure one or more tunnels.
+6. Start the add-on and verify the logs.
 
 Detailed usage, configuration, security notes, and troubleshooting are in [DOCS.md](DOCS.md).
+
+## Quick setup
+
+1. Install `SSH Tunnel Gateway` from the central Home Assistant repo.
+2. Prepare the remote SSH server so it accepts a key-based login for the tunnel user.
+3. Create a dedicated key pair, for example:
+
+   ```bash
+   ssh-keygen -t ed25519 -f id_ed25519 -C "ha-ssh-tunnel-gateway"
+   ```
+
+4. Add the public key to the remote server's `authorized_keys`.
+5. Create `known_hosts`, for example:
+
+   ```bash
+   ssh-keyscan -p 22 bastion.example.com > known_hosts
+   ```
+
+6. Copy `id_ed25519` and `known_hosts` into the add-on config folder under `ssh/`.
+7. Save an add-on config such as:
+
+   ```yaml
+   tunnels:
+     - name: grafana
+       ssh_host: bastion.example.com
+       ssh_port: 22
+       ssh_user: ha_tunnel
+       local_port: 3000
+       remote_host: 127.0.0.1
+       remote_port: 3000
+       server_alive_interval: 30
+       server_alive_count_max: 3
+       strict_host_key_checking: true
+   ```
+
+8. Start the add-on.
+9. Open `http://<HA-IP>:3000` from another LAN device to test the tunnel.
 
 ## Publishing to the central repo
 
